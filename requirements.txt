@@ -1,6 +1,0 @@
-streamlit
-kiteconnect>=4.0.0
-pandas
-urllib3
-certifi
-pyotp
