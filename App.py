@@ -1,0 +1,273 @@
+import streamlit as st
+from kiteconnect import KiteConnect
+import pandas as pd
+from datetime import datetime, timedelta
+import math
+
+# Page Configuration
+st.set_page_config(
+    page_title="Nexion Professional Trading Terminal",
+    page_icon="📈",
+    layout="wide"
+)
+
+st.title("📈 Nexion Live Trading & F&O Intelligence Terminal")
+st.markdown("### Production-Grade Zerodha Integration | Real-Time LTP, OI, Charts & Automated Targets")
+
+# ---------------------------------------------------------
+# 1. SECURE OAUTH GATEWAY (100% LOOP-FREE ARCHITECTURE)
+# ---------------------------------------------------------
+st.sidebar.header("🔐 Zerodha Kite Gateway")
+
+api_key = st.sidebar.text_input("API Key", key="input_api_key", type="default")
+api_secret = st.sidebar.text_input("API Secret", key="input_api_secret", type="password")
+
+if "access_token" not in st.session_state:
+    st.session_state.access_token = None
+if "pending_request_token" not in st.session_state:
+    st.session_state.pending_request_token = None
+
+# Intercept request_token from URL and clear immediately to prevent redirect loops
+query_params = dict(st.query_params)
+if "request_token" in query_params:
+    st.session_state.pending_request_token = query_params["request_token"]
+    st.query_params.clear()
+    st.rerun()
+
+if api_key:
+    try:
+        kite = KiteConnect(api_key=api_key)
+        login_url = kite.login_url()
+        
+        if st.session_state.pending_request_token and not st.session_state.access_token:
+            if api_secret:
+                try:
+                    data = kite.generate_session(st.session_state.pending_request_token, api_secret=api_secret)
+                    st.session_state.access_token = data["access_token"]
+                    st.session_state.pending_request_token = None
+                    st.sidebar.success("✅ Login Successful! Session Active.")
+                    st.rerun()
+                except Exception as e:
+                    st.sidebar.error(f"❌ Session Gen Error: {str(e)}")
+            else:
+                st.sidebar.warning("⚠️ Enter your API Secret above to finalize session generation.")
+
+        if not st.session_state.access_token:
+            st.sidebar.markdown(f"""
+                <div style="text-align: center; margin-top: 15px; margin-bottom: 15px;">
+                    <a href="{login_url}" target="_self" style="background-color: #D32F2F; color: white; padding: 14px 20px; text-align: center; text-decoration: none; display: block; font-size: 16px; font-weight: bold; border-radius: 6px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
+                        🔴 Login with Zerodha Kite
+                    </a>
+                </div>
+            """, unsafe_allow_html=True)
+            st.sidebar.info("👆 Click to authenticate securely via mobile or browser.")
+        else:
+            st.sidebar.success("🟢 Active Session Connected via Kite API")
+            if st.sidebar.button("Logout / Reset Session"):
+                st.session_state.access_token = None
+                st.session_state.pending_request_token = None
+                st.query_params.clear()
+                st.rerun()
+    except Exception as e:
+        st.sidebar.error(f"Kite Init Error: {e}")
+else:
+    st.sidebar.warning("⚠️ Enter your API Key above to activate the login gateway.")
+
+st.sidebar.markdown("---")
+
+# ---------------------------------------------------------
+# 2. UNIVERSAL INSTRUMENT FETCHING & SEARCH
+# ---------------------------------------------------------
+default_instruments = {
+    "SENSEX": {"exchange": "BSE", "tradingsymbol": "SENSEX", "token": 265},
+    "NIFTY 50": {"exchange": "NSE", "tradingsymbol": "NIFTY 50", "token": 256265},
+    "BANK NIFTY": {"exchange": "NSE", "tradingsymbol": "NIFTY BANK", "token": 260105},
+    "RELIANCE": {"exchange": "NSE", "tradingsymbol": "RELIANCE", "token": 738561},
+    "TCS": {"exchange": "NSE", "tradingsymbol": "TCS", "token": 2953215},
+    "HDFC BANK": {"exchange": "NSE", "tradingsymbol": "HDFCBNK", "token": 341249},
+    "INFY": {"exchange": "NSE", "tradingsymbol": "INFY", "token": 408065},
+    "ITC": {"exchange": "NSE", "tradingsymbol": "ITC", "token": 424961},
+    "SBIN": {"exchange": "NSE", "tradingsymbol": "SBIN", "token": 779521}
+}
+
+instrument_map = default_instruments
+
+if st.session_state.access_token and api_key:
+    try:
+        k_client = KiteConnect(api_key=api_key)
+        k_client.set_access_token(st.session_state.access_token)
+        live_insts = k_client.instruments("NSE")
+        if live_insts:
+            for inst in live_insts:
+                sym = inst['tradingsymbol']
+                instrument_map[sym] = {
+                    "exchange": inst['exchange'],
+                    "tradingsymbol": sym,
+                    "token": inst['instrument_token']
+                }
+    except Exception:
+        pass
+
+st.markdown("### 🔍 Live Script Selection & Decision Parameters")
+col_s1, col_s2, col_s3 = st.columns([2, 1, 1])
+
+with col_s1:
+    selected_script = st.selectbox("Search or Select Equity / Index", options=list(instrument_map.keys()), index=0)
+with col_s2:
+    timeframe = st.selectbox("Chart Timeframe", ["3minute", "5minute", "15minute", "day"])
+with col_s3:
+    bias_view = st.selectbox("Strategy Bias", ["Bullish (Long)", "Bearish (Short)", "Neutral / Range"])
+
+st.markdown("---")
+
+# ---------------------------------------------------------
+# 3. LIVE SYSTEM DATA FETCHING (LTP, QUOTE, OI, HISTORY)
+# ---------------------------------------------------------
+spot_price = 0.0
+oi_val = 0
+oi_change_val = 0.0
+volume_val = 0
+historical_df = pd.DataFrame()
+is_live_connected = False
+
+selected_info = instrument_map.get(selected_script, {"exchange": "NSE", "tradingsymbol": selected_script, "token": 256265})
+symbol_key = f"{selected_info['exchange']}:{selected_info['tradingsymbol']}"
+
+if st.session_state.access_token and api_key:
+    try:
+        k_client = KiteConnect(api_key=api_key)
+        k_client.set_access_token(st.session_state.access_token)
+        
+        quote_res = k_client.quote([symbol_key])
+        if symbol_key in quote_res:
+            q_data = quote_res[symbol_key]
+            spot_price = q_data["last_price"]
+            volume_val = q_data.get("volume", 0)
+            oi_val = q_data.get("oi", 0)
+            oi_change_val = q_data.get("oi_day_change", 0.0)
+            is_live_connected = True
+
+        token = selected_info["token"]
+        to_date = datetime.now()
+        from_date = to_date - timedelta(days=5 if timeframe != "day" else 60)
+        
+        hist_data = k_client.historical_data(token, from_date, to_date, timeframe)
+        if hist_data:
+            historical_df = pd.DataFrame(hist_data)
+    except Exception as e:
+        pass
+
+if not is_live_connected or spot_price == 0.0:
+    fallback_prices = {
+        "SENSEX": 83150.00, "NIFTY 50": 24550.00, "BANK NIFTY": 51300.00,
+        "RELIANCE": 2980.00, "TCS": 2530.00, "HDFC BANK": 1725.00
+    }
+    spot_price = fallback_prices.get(selected_script, 1500.00)
+    oi_val = 1250400
+    oi_change_val = 4.25
+    volume_val = 8450000
+
+# Top Metrics Row
+col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
+col_m1.metric(f"{selected_script} LTP", f"₹ {spot_price:,.2f}", "Live Tick" if is_live_connected else "Simulation")
+col_m2.metric("Open Interest (OI)", f"{oi_val:,}" if oi_val else "N/A")
+col_m3.metric("OI Change (%)", f"{oi_change_val:+.2f}%")
+col_m4.metric("Traded Volume", f"{volume_val:,}")
+col_m5.metric("Feed Status", "🟢 LIVE KITE" if is_live_connected else "🟡 OFFLINE / MOCK")
+
+st.markdown("---")
+
+# ---------------------------------------------------------
+# 4. PRICE ACTION CHART (ROBUST NATIVE STREAMLIT CHART)
+# ---------------------------------------------------------
+st.markdown(f"### 📊 Price Action Trend for `{selected_script}`")
+
+if not historical_df.empty and 'close' in historical_df.columns:
+    chart_data = historical_df.set_index('date')[['close']]
+    st.line_chart(chart_data)
+else:
+    st.info("💡 Login with Zerodha Kite above to load live historical price action data.")
+
+st.markdown("---")
+
+# ---------------------------------------------------------
+# 5. EQUITY INVESTMENT TARGETS & STOP LOSS
+# ---------------------------------------------------------
+st.markdown(f"### 💼 Equity Decision Matrix & Targets for `{selected_script}`")
+
+eq_buy_low = spot_price * 0.992
+eq_buy_high = spot_price
+eq_target = spot_price * 1.045
+eq_sl = spot_price * 0.975
+
+col_eq1, col_eq2, col_eq3 = st.columns(3)
+col_eq1.metric("Recommended Buy Zone", f"₹ {eq_buy_low:,.2f} - ₹ {eq_buy_high:,.2f}")
+col_eq2.metric("Target Sell Price", f"₹ {eq_target:,.2f} (+4.5%)")
+col_eq3.metric("Capital Protection Stop Loss", f"₹ {eq_sl:,.2f} (-2.5%)")
+
+# ---------------------------------------------------------
+# 6. DYNAMIC F&O STRATEGY & OPTION PRICING ENGINE (CE / PE)
+# ---------------------------------------------------------
+st.markdown(f"### ⚡ F&O Derivative Recommendations & Option Pricing for `{selected_script}`")
+
+strike_interval = 100 if spot_price > 10000 else (50 if spot_price > 2000 else 10)
+atm_strike = round(spot_price / strike_interval) * strike_interval
+
+def calculate_option_premium(spot, strike, option_type, iv=0.22, days_to_expiry=4):
+    t = max(days_to_expiry / 365.0, 0.001)
+    if option_type == 'CE':
+        intrinsic = max(0.0, spot - strike)
+        time_value = spot * (iv * 0.35) * math.sqrt(t) * max(0.4, 1.0 - abs(spot - strike) / spot)
+        premium = intrinsic + max(time_value, spot * 0.008)
+    else:
+        intrinsic = max(0.0, strike - spot)
+        time_value = spot * (iv * 0.35) * math.sqrt(t) * max(0.4, 1.0 - abs(spot - strike) / spot)
+        premium = intrinsic + max(time_value, spot * 0.008)
+    return round(max(premium, 2.00), 2)
+
+ce_entry = calculate_option_premium(spot_price, atm_strike, 'CE')
+ce_t1 = round(ce_entry * 1.35, 2)
+ce_t2 = round(ce_entry * 1.80, 2)
+ce_sl = round(ce_entry * 0.65, 2)
+
+pe_entry = calculate_option_premium(spot_price, atm_strike, 'PE')
+pe_t1 = round(pe_entry * 1.30, 2)
+pe_t2 = round(pe_entry * 1.70, 2)
+pe_sl = round(pe_entry * 0.70, 2)
+
+col_call, col_put = st.columns(2)
+
+with col_call:
+    st.markdown("#### 🟢 Call Option (CE) Setup - Bullish Momentum")
+    st.success(f"""
+    * **Instrument Contract:** `{selected_script} {atm_strike} CE`
+    * **Action:** **BUY / LONG**
+    * **Dynamic Entry Premium:** `₹ {ce_entry:,.2f}`
+    * **Target 1:** `₹ {ce_t1:,.2f}` (+35%)
+    * **Target 2:** `₹ {ce_t2:,.2f}` (+80%)
+    * **Stop Loss:** `₹ {ce_sl:,.2f}`
+    """)
+
+with col_put:
+    st.markdown("#### 🔴 Put Option (PE) Setup - Bearish Hedge")
+    st.error(f"""
+    * **Instrument Contract:** `{selected_script} {atm_strike} PE`
+    * **Action:** **SELL / SHORT ON RALLY**
+    * **Dynamic Entry Premium:** `₹ {pe_entry:,.2f}`
+    * **Target 1:** `₹ {pe_t1:,.2f}`
+    * **Target 2:** `₹ {pe_t2:,.2f}`
+    * **Stop Loss:** `₹ {pe_sl:,.2f}`
+    """)
+
+# ---------------------------------------------------------
+# 7. DECISION LOGIC & RATIONALE
+# ---------------------------------------------------------
+st.markdown("### 🧠 Decision-Making Rationale & Analysis")
+st.info(f"""
+* **Live System Feed:** {'Active connection with Zerodha Kite Connect streaming live LTP and OI metrics.' if is_live_connected else 'Operating in simulation mode; log in via the sidebar to fetch live exchange ticks.'}
+* **Derivative Calibration:** ATM strikes are pinned at `{atm_strike}` for `{selected_script}`. Option premiums adjust dynamically according to the live underlying equity/index spot price.
+* **Risk Management Rule:** Adhere strictly to the designated stop-loss thresholds to protect capital against sudden volatility swings.
+""")
+
+st.markdown("---")
+st.caption("Nexion Consulting • Professional Algorithmic F&O & Equity Intelligence | Powered by Zerodha Kite Connect")
